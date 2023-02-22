@@ -1,86 +1,79 @@
 ﻿using CacheStorm.Attributes;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.DependencyInjection;
 using System.Reflection;
 
-namespace CacheStorm.Services
+namespace CacheStorm.Services;
+
+public class DbContextInMemoryService : IDbContextInMemoryService
 {
-    public class DbContextInMemoryService : IDbContextInMemoryService
+    public void AddEntitiesInToMemoryCache(IServiceCollection serviceCollection)
     {
-        private readonly DbContext _dbContext;
-        private readonly IMemoryCache _memoryCache;
+        var dbContextSuccessors = GetRegisteredDbContextSuccessors(serviceCollection);
 
-        public DbContextInMemoryService(DbContext dbContext, IMemoryCache memoryCache)
+        if (dbContextSuccessors is not null)
         {
-            _dbContext = dbContext;
-            _memoryCache = memoryCache;
-        }
-
-        public async Task AddEntitiesToInMemory()
-        {
-            var dbContextSuccessors = GetDbContextSuccessors();
-
             foreach (var dbContextSuccessor in dbContextSuccessors)
             {
-                var dbContextSuccessorWithInMemoryAttribute = dbContextSuccessor.GetCustomAttribute<InMemoryAttribute>();
-
-                if (dbContextSuccessorWithInMemoryAttribute is not null)
-                {
-                    await AddDbContextSuccessorAllDbSetsToInMemory(dbContextSuccessor, dbContextSuccessorWithInMemoryAttribute.ExpirationPeriod!.Value);
-
-                    continue;
-                }
-
-                var dbContextSucessorPropertiesWithInMemoryAttributes = dbContextSuccessor.GetProperties().Where(property => property.GetCustomAttribute<InMemoryAttribute>() is not null).ToList();
-
-                if (dbContextSucessorPropertiesWithInMemoryAttributes is not null && dbContextSucessorPropertiesWithInMemoryAttributes.Any())
-                {
-                    await AddDbContextSuccessorSelectedDbSetsToInMemory(dbContextSucessorPropertiesWithInMemoryAttributes);
-                }
+                AddEntitiesInToMemoryCacheForDbContextSuccessor(dbContextSuccessor, serviceCollection);
             }
         }
+    }
 
-        private async Task AddDbContextSuccessorAllDbSetsToInMemory(Type dbContextSuccessor, TimeSpan expirationTime)
+    private ICollection<Type> GetRegisteredDbContextSuccessors(IServiceCollection serviceCollection)
+    {
+        var dbContextSuccessors = serviceCollection
+            .Where(service =>
+                service.ServiceType.IsSubclassOf(typeof(DbContext)) &&
+                service.ServiceType.IsAbstract == false &&
+                service.ServiceType.IsClass)
+            .Select(service => service.ServiceType)
+            .ToList();
+
+        return dbContextSuccessors;
+    }
+
+    private void AddEntitiesInToMemoryCacheForDbContextSuccessor(Type dbContextSuccessor, IServiceCollection serviceCollection)
+    {
+        var dbContextSuccessorWithInMemoryAttribute = dbContextSuccessor.GetCustomAttribute<InMemoryAttribute>();
+
+        var dbSets = dbContextSuccessor
+          .GetProperties()
+          .Where(property =>
+              property.PropertyType.IsGenericType &&
+              property.PropertyType.GetGenericTypeDefinition() == typeof(DbSet<>));
+
+        if (dbContextSuccessorWithInMemoryAttribute is null)
         {
-            var dbContextSuccessorProperties = dbContextSuccessor.GetProperties();
-            var entities = dbContextSuccessorProperties.Where(dbContextSuccessorProperty =>
-                dbContextSuccessorProperty.PropertyType.IsGenericType &&
-                dbContextSuccessorProperty.PropertyType.GetGenericTypeDefinition() == typeof(DbSet<>)).ToList();
-
-            foreach (var entity in entities)
-            {
-                await AddToInMemory(entity, expirationTime);
-            }
+            dbSets = dbSets.Where(property => property.GetCustomAttribute<InMemoryAttribute>() is not null);
         }
 
-        private async Task AddDbContextSuccessorSelectedDbSetsToInMemory(ICollection<PropertyInfo> dbContextSuccessorProperties)
+        foreach (var dbSet in dbSets.ToList())
         {
-            foreach (var dbContextSuccessorProperty in dbContextSuccessorProperties)
-            {
-                var dbContextSuccessorPropertiesInMemoryAttribute = dbContextSuccessorProperty.GetCustomAttribute<InMemoryAttribute>();
+            var expirationPeriod = dbContextSuccessorWithInMemoryAttribute is not null
+                ? dbContextSuccessorWithInMemoryAttribute.ExpirationPeriod
+                : dbSet.GetCustomAttribute<InMemoryAttribute>()!.ExpirationPeriod;
 
-                await AddToInMemory(dbContextSuccessorProperty.PropertyType, dbContextSuccessorPropertiesInMemoryAttribute!.ExpirationPeriod!.Value);
-            }
+            var entityType = dbSet.PropertyType.GetGenericArguments().First();
+
+            AddToInMemory(entityType, dbContextSuccessor, serviceCollection, expirationPeriod);
         }
+    }
 
-        private async Task AddToInMemory<TEntity>(TEntity entity, TimeSpan expirationTime) where TEntity : class
-        {
-            var dbContextSetter = _dbContext.Set<TEntity>();
-            var dbSet = await dbContextSetter.ToListAsync();
+    private void AddToInMemory(Type entity, Type dbContextSuccessor, IServiceCollection serviceCollection, TimeSpan expirationTime)
+    {
+        using var serviceProvider = serviceCollection.BuildServiceProvider();
 
-            _memoryCache.Set(entity, dbSet, expirationTime);
-        }
+        var serviceDbContext = serviceProvider.GetService(dbContextSuccessor);
+        var dbContextSetMethod = dbContextSuccessor.GetMethod(nameof(DbContext.Set), new[] { typeof(string) })!.MakeGenericMethod(entity);
+        var dbSet = dbContextSetMethod.Invoke(serviceDbContext, new object[] { entity.FullName! });
 
-        private ICollection<Type> GetDbContextSuccessors()
-        {
-            var dbContextSuccessor = Assembly.GetExecutingAssembly()
-                .GetTypes().Where(assembly =>
-                    assembly.IsClass &&
-                    assembly.IsAbstract == false &&
-                    assembly.IsSubclassOf(typeof(DbContext)))
-                .ToList();
+        var enumerableToListMethod = typeof(Enumerable).GetMethod(nameof(Enumerable.ToList))!.MakeGenericMethod(entity);
+        var entities = enumerableToListMethod.Invoke(null, new[] { dbSet });
 
-            return dbContextSuccessor;
-        }
+        var memoryCacheService = serviceProvider.GetService<IMemoryCache>();
+
+        memoryCacheService.Set(entity.Name, entities, expirationTime);
     }
 }
