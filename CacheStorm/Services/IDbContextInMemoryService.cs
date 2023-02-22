@@ -1,7 +1,8 @@
-﻿namespace CacheStorm.Services
+﻿using Microsoft.Extensions.DependencyInjection;
+
+namespace CacheStorm.Services;
+
+public interface IDbContextInMemoryService
 {
-    public interface IDbContextInMemoryService
-    {
-        Task AddEntitiesToInMemory();
-    }
+    void AddEntitiesInToMemoryCache(IServiceCollection serviceCollection);
 }
