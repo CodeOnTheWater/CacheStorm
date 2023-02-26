@@ -1,27 +1,21 @@
 ﻿using CacheStorm.Services;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace CacheStorm.Extensions;
 
 public static class ServiceCollectionExtension
 {
-    public static async Task AddDbContextToInMemoryCache(this IServiceCollection serviceCollection)
+    public static void AddDbContextToInMemoryCache(this IServiceCollection serviceCollection)
     {
         try
         {
-            serviceCollection.AddMemoryCache();
-            serviceCollection.AddScoped<IDbContextInMemoryService, DbContextInMemoryService>();
+            var dbContextInMemoryService = new DbContextInMemoryService();
 
-            using var serviceProvider = serviceCollection.BuildServiceProvider();
-            
-            var dbContextInMemoryService = serviceProvider.GetService<IDbContextInMemoryService>();
-
-            dbContextInMemoryService.AddEntitiesInToMemoryCache(serviceCollection);
+            dbContextInMemoryService.AddEntitiesInToMemory(serviceCollection);
         }
-        catch (Exception exception)
+        catch
         {
-
+            //swallow
         }
     }
 }
